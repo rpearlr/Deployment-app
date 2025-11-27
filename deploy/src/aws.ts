@@ -1,72 +1,112 @@
-import { S3 } from "aws-sdk";
-import fs from "fs";
-import path from "path";
+const express = require("express");
+const { S3 } = require("aws-sdk");
+const fs = require("fs");
+const path = require("path");
+
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 const s3 = new S3({
-  accessKeyId:process.env.ACCESS_ID,
-  secretAccessKey:process.env.SECRET_ACCESS,
-  endpoint:process.env.ENDPOINT
-})
+  accessKeyId: process.env.ACCESS_ID,
+  secretAccessKey: process.env.SECRET_ACCESS,
+  endpoint: process.env.ENDPOINT,
+});
 
-export async function downloadS3Folder(prefix: string) {
-    const allFiles = await s3.listObjectsV2({
-        Bucket: "vercel",
-        Prefix: prefix
-    }).promise();
-    
-    const allPromises = allFiles.Contents?.map(async ({Key}) => {
-        return new Promise(async (resolve) => {
-            if (!Key) {
-                resolve("");
-                return;
-            }
-            const finalOutputPath = path.join(__dirname, Key);
-            const outputFile = fs.createWriteStream(finalOutputPath);
-            const dirName = path.dirname(finalOutputPath);
-            if (!fs.existsSync(dirName)){
-                fs.mkdirSync(dirName, { recursive: true });
-            }
-            s3.getObject({
-                Bucket: "vercel",
-                Key
-            }).createReadStream().pipe(outputFile).on("finish", () => {
-                resolve("");
-            })
-        })
-    }) || []
-    console.log("awaiting");
 
-    await Promise.all(allPromises?.filter(x => x !== undefined));
-}
-
-export function copyFinalDist(id: string) {
-    const folderPath = path.join(__dirname, `output/${id}/dist`);
-    const allFiles = getAllFiles(folderPath);
-    allFiles.forEach(file => {
-        uploadFile(`dist/${id}/` + file.slice(folderPath.length + 1), file);
+async function downloadS3Folder(prefix) {
+  const allFiles = await s3
+    .listObjectsV2({
+      Bucket: "vercel",
+      Prefix: prefix,
     })
-}
+    .promise();
 
-const getAllFiles = (folderPath: string) => {
-    let response: string[] = [];
+  const promises = (allFiles.Contents || []).map(({ Key }) => {
+    return new Promise((resolve) => {
+      if (!Key) return resolve("");
 
-    const allFilesAndFolders = fs.readdirSync(folderPath);allFilesAndFolders.forEach(file => {
-        const fullFilePath = path.join(folderPath, file);
-        if (fs.statSync(fullFilePath).isDirectory()) {
-            response = response.concat(getAllFiles(fullFilePath))
-        } else {
-            response.push(fullFilePath);
-        }
+      const localPath = path.join(__dirname, Key);
+      const dirName = path.dirname(localPath);
+
+      if (!fs.existsSync(dirName)) {
+        fs.mkdirSync(dirName, { recursive: true });
+      }
+
+      const fileStream = fs.createWriteStream(localPath);
+      s3.getObject({ Bucket: "vercel", Key })
+        .createReadStream()
+        .pipe(fileStream)
+        .on("finish", () => resolve(""));
     });
-    return response;
+  });
+
+  await Promise.all(promises);
 }
 
-const uploadFile = async (fileName: string, localFilePath: string) => {
-    const fileContent = fs.readFileSync(localFilePath);
-    const response = await s3.upload({
-        Body: fileContent,
-        Bucket: "vercel",
-        Key: fileName,
-    }).promise();
-    console.log(response);
+async function uploadFileToS3(fileName, localPath) {
+  const data = fs.readFileSync(localPath);
+
+  return s3
+    .upload({
+      Bucket: "vercel",
+      Key: fileName,
+      Body: data,
+    })
+    .promise();
 }
+
+function getAllFiles(folderPath) {
+  let output = [];
+
+  const entries = fs.readdirSync(folderPath);
+
+  entries.forEach((entry) => {
+    const fullPath = path.join(folderPath, entry);
+
+    if (fs.statSync(fullPath).isDirectory()) {
+      output = output.concat(getAllFiles(fullPath));
+    } else {
+      output.push(fullPath);
+    }
+  });
+
+  return output;
+}
+
+async function uploadDistFolder(id) {
+  const folderPath = path.join(__dirname, `output/${id}/dist`);
+  const files = getAllFiles(folderPath);
+
+  for (const file of files) {
+    const s3Key = `dist/${id}/` + file.slice(folderPath.length + 1);
+    console.log("Uploading:", s3Key);
+    await uploadFileToS3(s3Key, file);
+  }
+}
+
+
+app.get("/download/:prefix", async (req, res) => {
+  try {
+    const { prefix } = req.params;
+    await downloadS3Folder(prefix);
+    res.json({ status: "success", message: `Downloaded: ${prefix}` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Download failed" });
+  }
+});
+
+app.post("/upload-dist/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await uploadDistFolder(id);
+    res.json({ status: "success", message: `Uploaded dist for ID: ${id}` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Upload failed" });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
